@@ -5228,4 +5228,4 @@ def get_purchase_request_statuswise_count():
 
 
 if __name__ == '__main__':
-    application.run(debug=True)
+    application.run(host='172.16.134.36',port=5000,debug=True)
