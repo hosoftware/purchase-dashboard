@@ -9,7 +9,7 @@ import base64
 import redis
 import pickle
 application = Flask(__name__)
-CORS(application, resources={r"/*": {"origins": "http://aries-group.in"}})
+#CORS(application, resources={r"/*": {"origins": "http://aries-group.in"}})
 
 # application.config['MYSQL_HOST'] = 'localhost'
 # application.config['MYSQL_USER'] = 'ariesgroupin_purchaseapproval'
@@ -33,7 +33,7 @@ with application.app_context():
 
 @application.after_request
 def after_request(response):
-    response.headers['Access-Control-Allow-Origin'] = 'http://aries-group.in'
+    #response.headers['Access-Control-Allow-Origin'] = 'http://aries-group.in'
     response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
     response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
     return response
