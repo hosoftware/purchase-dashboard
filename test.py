@@ -38,6 +38,11 @@ def after_request(response):
     response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
     return response
 
+
+@application.route('/')
+def home():
+    return "Hello Flask via uWSGI!"
+
 @application.route('/api/employee_dummy', methods=['GET'])
 def get_employee_dummy():
     name='Prabhiraj Nadaraj'
