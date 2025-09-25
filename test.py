@@ -108,7 +108,7 @@ def get_role_code():
         
 @application.route('/api/analytics', methods=['GET'])
 def get_analytics():
-    r = redis.StrictRedis(host='localhost', port=6379, db=0, decode_responses=False)
+    # r = redis.StrictRedis(host='localhost', port=6379, db=0, decode_responses=False)
     cursor = mysql.connection.cursor()
     encoded_user_id = request.args.get('user_id')
     decoded_bytes = base64.b64decode(encoded_user_id)
@@ -119,11 +119,11 @@ def get_analytics():
     employee_id = user_role_query[0][1]
     role_code = user_role_query[0][2]
     cache_key = f"purchase_request_data_{employee_id}"
-    cached_data = r.get(cache_key)
-    if cached_data:
+    # cached_data = r.get(cache_key)
+    # if cached_data:
         # If data is found in cache, return the cached data
         # print("Using cached data")
-        return pickle.loads(cached_data)
+        # return pickle.loads(cached_data)
     # return({ "user": role_code })
     if user_role == 2:
         cursor.callproc('GenerateYearlyQuery', (userid,))
@@ -791,7 +791,7 @@ WHERE purchase_in_charge = %s AND cancel = 0
             "partial_md_count": partial_md_result[0][0],
             "md_pending_requests": md_pending_requests_result
         }
-        r.setex(cache_key, 600, pickle.dumps(data))
+        # r.setex(cache_key, 600, pickle.dumps(data))
         return jsonify(data)
     elif role_code == 'mngr':
         current_year = datetime.now().year  
