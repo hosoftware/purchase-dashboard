@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, send_from_directory
 import re
 from flask_mysqldb import MySQL
 from flask_cors import CORS
@@ -8,7 +8,7 @@ from datetime import timedelta
 import base64
 import redis
 import pickle
-application = Flask(__name__)
+application = Flask(__name__, static_folder="build/assets", template_folder="build")
 #CORS(application, resources={r"/*": {"origins": "http://aries-group.in"}})
 
 # application.config['MYSQL_HOST'] = 'localhost'
@@ -39,9 +39,15 @@ def after_request(response):
     return response
 
 
-@application.route('/')
-def home():
-    return "Hello Flask via uWSGI!"
+# Serve React index.html on root
+@application.route("/")
+def serve_index():
+    return send_from_directory(application.template_folder, "index.html")
+
+# Serve static files (JS, CSS, images)
+@application.route("/static/<path:path>")
+def serve_static(path):
+    return send_from_directory(application.static_folder, path)
 
 @application.route('/api/employee_dummy', methods=['GET'])
 def get_employee_dummy():
