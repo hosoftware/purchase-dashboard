@@ -147,7 +147,6 @@ def get_role_code():
         
 @application.route('/api/analytics', methods=['GET'])
 def get_analytics():
-    return jsonify({"Success":"YES"})
     r = redis.StrictRedis(host='localhost', port=6379, db=0, decode_responses=False)
     cursor = mysql.connection.cursor()
     encoded_user_id = request.args.get('user_id')
@@ -160,6 +159,8 @@ def get_analytics():
     role_code = user_role_query[0][2]
     cache_key = f"purchase_request_data_{employee_id}"
     cached_data = r.get(cache_key)
+    return jsonify({"Success": user_role})
+
     if cached_data:
         # If data is found in cache, return the cached data
         # print("Using cached data")
