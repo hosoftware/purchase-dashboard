@@ -435,7 +435,7 @@ def get_analytics():
             
         })
     elif user_role == 3:
-        
+        return jsonify({"Success":"YES"})
         if role_code != 'pmngr1':
             cursor.callproc('PurchaseReviewerYearly', (employee_id,))
             rows = cursor.fetchall()
