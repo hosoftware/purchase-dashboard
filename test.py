@@ -62,6 +62,8 @@ def get_employee_dummy():
 
 @application.route('/api/employee', methods=['GET'])
 def get_employee():
+    current_year = datetime.now().year  
+    current_month = datetime.now().month
     cursor = mysql.connection.cursor()
     encoded_user_id = request.args.get('user_id')
     decoded_bytes = base64.b64decode(encoded_user_id)
@@ -74,6 +76,40 @@ def get_employee():
     role_code = user_role_query[0][3]
     cursor.execute("SELECT role_id,user_id,employee_id,full_name,role_code FROM users WHERE role_id = 3;")
     users_query = cursor.fetchall()
+    if role_code == 'mngr':
+        cursor.execute(
+        "SELECT COALESCE(approval_limit, 0), COALESCE(currency, 'AED'),COALESCE(approval_limit_monthly, 0) FROM users WHERE user_id = %s;",
+            (userid,)
+        )
+        limit_per_req = cursor.fetchall()
+        cursor.execute(
+            """SELECT 
+                    ROUND(
+                        SUM(
+                            CASE 
+                                WHEN purchase_request.final_amount_currency = 'AED' 
+                                THEN purchase_request.final_amount 
+                                ELSE purchase_request.final_amount * COALESCE(latest_rates.rate_buy, 1)
+                            END
+                        ), 2
+                    ) AS total_final_amount_in_aed
+                FROM 
+                    purchase_request
+                LEFT JOIN 
+                    (
+                        SELECT curr_code, rate_buy
+                        FROM 0_exchange_rates 
+                        WHERE rate_type = 'AED'
+                        AND id = (SELECT MAX(id) FROM 0_exchange_rates WHERE rate_type = 'AED')
+                    ) AS latest_rates
+                    ON purchase_request.final_amount_currency = latest_rates.curr_code
+                WHERE 
+                    purchase_request.approved_by = %s AND YEAR(purchase_request.management_approval)  = %s AND MONTH(purchase_request.management_approval)  = %s ;""", (userid, current_year, current_month)
+        )
+        approved_amount = cursor.fetchall()
+    else:
+        limit_per_req = 0
+        approved_amount = 0
     # cursor.callproc('GenerateYearlyQuery', (userid,))
     # rows = cursor.fetchall()
     # total_requests = rows[0] if rows else 0
@@ -81,7 +117,10 @@ def get_employee():
             "username": name,
             "userrole": user_role_query,
             "role_code": role_code,
-            "users": users_query
+            "users": users_query,
+            "limit_per_req": limit_per_req,
+            "approved_amount": approved_amount
+            
         })
 # userid = 34 
 @application.route('/api/role_code', methods=['GET'])
@@ -108,7 +147,7 @@ def get_role_code():
         
 @application.route('/api/analytics', methods=['GET'])
 def get_analytics():
-    # r = redis.StrictRedis(host='localhost', port=6379, db=0, decode_responses=False)
+    r = redis.StrictRedis(host='localhost', port=6379, db=0, decode_responses=False)
     cursor = mysql.connection.cursor()
     encoded_user_id = request.args.get('user_id')
     decoded_bytes = base64.b64decode(encoded_user_id)
@@ -119,11 +158,11 @@ def get_analytics():
     employee_id = user_role_query[0][1]
     role_code = user_role_query[0][2]
     cache_key = f"purchase_request_data_{employee_id}"
-    # cached_data = r.get(cache_key)
-    # if cached_data:
+    cached_data = r.get(cache_key)
+    if cached_data:
         # If data is found in cache, return the cached data
         # print("Using cached data")
-        # return pickle.loads(cached_data)
+        return pickle.loads(cached_data)
     # return({ "user": role_code })
     if user_role == 2:
         cursor.callproc('GenerateYearlyQuery', (userid,))
@@ -537,17 +576,17 @@ def get_analytics():
         cursor.execute(utilized_budget, (employee_id,))
         utilized_budget_result = cursor.fetchall()
         follow_up = """SELECT 
-                            COUNT(CASE WHEN follow_up_date = CURDATE() THEN 1 END) AS today_count,
-                            COUNT(CASE WHEN follow_up_date = DATE_SUB(CURDATE(), INTERVAL 1 DAY) THEN 1 END) AS yesterday_count,
-                            COUNT(CASE WHEN follow_up_date < DATE_SUB(CURDATE(), INTERVAL 1 DAY) THEN 1 END) AS previous_follow_up_count
+                            COUNT(CASE WHEN next_action_date = CURDATE() THEN 1 END) AS today_count,
+                            COUNT(CASE WHEN next_action_date = DATE_SUB(CURDATE(), INTERVAL 1 DAY) THEN 1 END) AS yesterday_count,
+                            COUNT(CASE WHEN next_action_date < DATE_SUB(CURDATE(), INTERVAL 1 DAY) THEN 1 END) AS previous_follow_up_count
                         FROM (
-                            SELECT DISTINCT purchase_actions.rec_id, follow_up_date
+                            SELECT DISTINCT purchase_actions.rec_id, next_action_date
                             FROM purchase_actions
                             LEFT JOIN purchase_request 
                             ON purchase_actions.requesting_id = purchase_request.requesting_id
                             WHERE purchase_actions.is_current = 1 AND purchase_request.cancel=0 AND purchase_actions.action_id!='LPO_SUBMISSION'
                             AND purchase_request.purchase_in_charge = %s
-                            AND follow_up_date IS NOT NULL
+                            AND purchase_actions.next_action_date IS NOT NULL
                         ) AS unique_actions;"""
         cursor.execute(follow_up, (employee_id,))
         follow_up_result = cursor.fetchall()
@@ -763,6 +802,8 @@ WHERE purchase_in_charge = %s AND cancel = 0
         cursor.execute(md_pending_requests, (employee_id,))
 
         md_pending_requests_result = cursor.fetchall()
+        if total_requests in (None, 0):  # If None or 0, set a default tuple
+            total_requests = (0, "N/A")
         
         data = {
             "totalRequests": result[0],
@@ -791,7 +832,7 @@ WHERE purchase_in_charge = %s AND cancel = 0
             "partial_md_count": partial_md_result[0][0],
             "md_pending_requests": md_pending_requests_result
         }
-        # r.setex(cache_key, 600, pickle.dumps(data))
+        r.setex(cache_key, 600, pickle.dumps(data))
         return jsonify(data)
     elif role_code == 'mngr':
         current_year = datetime.now().year  
@@ -864,197 +905,42 @@ WHERE purchase_in_charge = %s AND cancel = 0
 
         expense_head_wise_result = cursor.fetchall()
         
-        comparison = """SELECT 
-    COALESCE(b.year, %s) AS year,  -- Replace NULL year with current_year
-    rt.name,  
-    ROUND(SUM(
-        CASE 
-            WHEN pr.final_amount IS NULL THEN 0
-            WHEN pr.final_amount_currency IS NULL OR pr.final_amount_currency = 'AED' THEN pr.final_amount
-            ELSE pr.final_amount * COALESCE(
-                (SELECT rate_buy 
-                 FROM 0_exchange_rates 
-                 WHERE curr_code = pr.final_amount_currency 
-                 AND rate_type = 'AED' 
-                 LIMIT 1), 
-                1
-            )
-        END
-    ), 2) AS total_final_amount,
+         
+        
 
-    -- Subquery to get total budget once per requesting type, replacing NULL with 0
-    COALESCE((
-        SELECT ROUND(SUM(b.budget), 2)
-        FROM yearly_budget b
-        WHERE b.expense_head_id = rt.id
-        AND b.year = %s
-        AND b.country != %s
-        AND b.country != %s
-    ), 0) AS total_budget
-    
-FROM 
-    purchase_request pr
-LEFT JOIN 
-    requesting_type rt ON pr.rquest_type_id = rt.id
-LEFT JOIN 
-    yearly_budget b ON b.expense_head_id = rt.id 
-    AND b.year = %s 
-    AND b.country != %s
-    AND b.country != %s
-WHERE
-    pr.company_id IN (SELECT id FROM 0_dimensions WHERE country != %s and country != %s)
-    AND YEAR(pr.requesting_date) = %s
-GROUP BY 
-    rt.name, b.year
-ORDER BY 
-    b.year, rt.name DESC;"""
         
-        cursor.execute(comparison, (current_year, current_year, 8,16, current_year, 8, 16, 8, 16, current_year))  # Pass current_year as parameter
-        comparison_result = cursor.fetchall()   
-        avg_actuals = sum(row[2] for row in comparison_result)
-        comparison_qatar = """SELECT 
-    COALESCE(b.year, %s) AS year,  -- Replace NULL year with current_year
-    rt.name,  
-    ROUND(SUM(
-        CASE 
-            WHEN pr.final_amount IS NULL THEN 0
-            WHEN pr.final_amount_currency IS NULL OR pr.final_amount_currency = 'AED' THEN pr.final_amount
-            ELSE pr.final_amount * COALESCE(
-                (SELECT rate_buy 
-                 FROM 0_exchange_rates 
-                 WHERE curr_code = pr.final_amount_currency 
-                 AND rate_type = 'AED' 
-                 LIMIT 1), 
-                1
-            )
-        END
-    ), 2) AS total_final_amount,
+        # avg_actuals_qatar = sum(row[2] for row in comparison_qatar_result)
+        
 
-    -- Subquery to get total budget once per requesting type, replacing NULL with 0
-    COALESCE((
-        SELECT ROUND(SUM(b.budget), 2)
-        FROM yearly_budget b
-        WHERE b.expense_head_id = rt.id
-        AND b.year = %s
-        AND b.country = %s
-    ), 0) AS total_budget
-    
-FROM 
-    purchase_request pr
-LEFT JOIN 
-    requesting_type rt ON pr.rquest_type_id = rt.id
-LEFT JOIN 
-    yearly_budget b ON b.expense_head_id = rt.id 
-    AND b.year = %s 
-    AND b.country = %s
-WHERE
-    pr.company_id IN (SELECT id FROM 0_dimensions WHERE country = %s)
-    AND YEAR(pr.requesting_date) = %s
-GROUP BY 
-    rt.name, b.year
-ORDER BY 
-    b.year, rt.name DESC;"""
-        
-        cursor.execute(comparison_qatar, (current_year, current_year, 16, current_year, 16, 16, current_year))  # Pass current_year as parameter
-        comparison_qatar_result = cursor.fetchall()   
-        avg_actuals_qatar = sum(row[2] for row in comparison_qatar_result)
-        comparison_india = """SELECT 
-    COALESCE(b.year, %s) AS year,  -- Replace NULL year with current_year
-    rt.name,  
-    ROUND(SUM(
-        CASE 
-            WHEN pr.final_amount IS NULL THEN 0
-            WHEN pr.final_amount_currency IS NULL OR pr.final_amount_currency = 'AED' THEN pr.final_amount
-            ELSE pr.final_amount * COALESCE(
-                (SELECT rate_buy 
-                 FROM 0_exchange_rates 
-                 WHERE curr_code = pr.final_amount_currency 
-                 AND rate_type = 'AED' 
-                 LIMIT 1), 
-                1
-            )
-        END
-    ), 2) AS total_final_amount,
+        # avg_actuals_india = sum(row[2] for row in comparison_india_result)
 
-    -- Subquery to get total budget once per requesting type, replacing NULL with 0
-    COALESCE((
-        SELECT ROUND(SUM(b.budget), 2)
-        FROM yearly_budget b
-        WHERE b.expense_head_id = rt.id
-        AND b.year = %s
-        AND b.country = %s
-    ), 0) AS total_budget
-    
-FROM 
-    purchase_request pr
-LEFT JOIN 
-    requesting_type rt ON pr.rquest_type_id = rt.id
-LEFT JOIN 
-    yearly_budget b ON b.expense_head_id = rt.id 
-    AND b.year = %s 
-    AND b.country = %s
-WHERE
-    pr.company_id IN (SELECT id FROM 0_dimensions WHERE country = %s)
-    AND YEAR(pr.requesting_date) = %s
-GROUP BY 
-    rt.name, b.year
-ORDER BY 
-    b.year, rt.name DESC;"""
         
-        cursor.execute(comparison_india, (current_year, current_year, current_year, 8, current_year, 8, current_year))  # Pass current_year as parameter
-        comparison_india_result = cursor.fetchall()
-   
-        avg_actuals_india = sum(row[2] for row in comparison_india_result)
-        budget = """SELECT 
-                        SUM(budget)
+        mngrpendingcount_query = """SELECT 
+                        count(*)
                     FROM 
-                        yearly_budget
+                        purchase_request
                     WHERE
-                        year = %s
-                        AND country = %s"""
+                        next_action_user = %s
+                        AND management_approval_status=0"""
+        # if option == 'monthly':
+        #     mngrpendingcount_query += " AND YEAR(management_approval) = %s AND MONTH(management_approval) = %s"
         
-        cursor.execute(budget, (current_year, 0))  # Pass current_year as parameter
-        budget_result = cursor.fetchall()
-        
-        budget_qatar = """SELECT 
-                        SUM(budget)
-                    FROM 
-                        yearly_budget
-                    WHERE
-                        year = %s
-                        AND country = %s"""
-        
-        cursor.execute(budget_qatar, (current_year, 16))  # Pass current_year as parameter
-        budget_qatar_result = cursor.fetchall()
-        budget_india = """SELECT 
-                        SUM(budget)
-                    FROM 
-                        yearly_budget
-                    WHERE
-                        year = %s
-                        AND country = %s"""
-        
-        cursor.execute(budget_india, (current_year, 8))  # Pass current_year as parameter
-        budget_india_result = cursor.fetchall()
+        cursor.execute(mngrpendingcount_query, (userid, ))  # Pass current_year and current_month as parameter
+        mngrpendingcount_result = cursor.fetchall()
         # You can now return the results
-        return jsonify({
+        data = {
             "totalRequests": result[0],
             "role_code": role_code,
             "pendings": pendings_result[0],
             "expense_head_wise": expense_head_wise_result,
-            "comparison": comparison_result,
-            "comparison_qatar": comparison_qatar_result,
-            "comparison_india": comparison_india_result,
-            "avgbudget": budget_result[0][0],
-            "avgbudgetqatar": budget_qatar_result[0][0],
-            "avgbudgetindia": budget_india_result[0][0],
-            "avgactuals": avg_actuals,
-            "avgactuals_qatar": avg_actuals_qatar,
-            "avgactuals_india": avg_actuals_india
-        })
+            "mngrpendingcount": mngrpendingcount_result[0][0]
+        }
+    # r.setex(cache_key, 600, pickle.dumps(data))
+    return jsonify(data)
 # API endpoint to get the request count based on the selected option
 @application.route('/api/requests', methods=['GET'])
 def get_requests():
+    r = redis.StrictRedis(host='localhost', port=6379, db=0, decode_responses=False)
     cursor = mysql.connection.cursor()
     option = request.args.get('option')  # Get the option from the query string
     encoded_user_id = request.args.get('user_id')
@@ -1068,6 +954,8 @@ def get_requests():
     current_month = datetime.now().month
     if not option:
         return jsonify({"error": "Option parameter is required"}), 400
+    
+    
 
     cursor = mysql.connection.cursor()  # Remove dictionary=True
     
@@ -2647,11 +2535,18 @@ def get_exceeding_date_requests():
                                                 0_emp.name,
                                                 purchase_request.final_amount,
                                                 purchase_request.final_amount_currency,
-                                                DATEDIFF(CURDATE(), purchase_request.expected_delivery_date) AS days_delayed
+                                                DATEDIFF(CURDATE(), purchase_request.expected_delivery_date) AS days_delayed,
+                                                purchase_request.requesting_date,
+                                                d1.name as division,
+                                                d2.name as subdivision
                                             FROM 
                                                 purchase_request
                                             LEFT JOIN 
                                                 0_emp ON purchase_request.purchase_in_charge = 0_emp.id
+                                            LEFT JOIN 
+                                                0_dimensions d1 ON purchase_request.division_id = d1.id
+                                            LEFT JOIN 
+                                                0_dimensions d2 ON purchase_request.subdivision_id = d2.id
                                             WHERE 
                                                 purchase_request.purchase_in_charge = %s 
                                                 AND purchase_request.meterial_delivery = 0
@@ -2665,7 +2560,10 @@ def get_exceeding_date_requests():
                     "person_incharge": row[2],
                     "final_amount": row[3],
                     "final_amount_currency": row[4],
-                    "days_delayed": row[5]
+                    "days_delayed": row[5],
+                    "requesting_date": row[6],
+                    "division": row[7],
+                    "subdivision": row[8]
                 }
                 for row in exceeding_date_requests_result
             ]
@@ -3165,11 +3063,18 @@ def get_md_pending_requests():
                                             purchase_request.final_amount,
                                             purchase_request.final_amount_currency,
                                             purchase_actions.action_id,
-                                            purchase_actions.status
+                                            purchase_actions.status,
+                                            purchase_request.requesting_date,
+                                            d1.name as divsion,
+                                            d2.name as subdivision
                                         FROM 
                                             purchase_request
                                         LEFT JOIN 
                                             0_emp ON purchase_request.purchase_in_charge = 0_emp.id
+                                        LEFT JOIN 
+                                            0_dimensions d1 ON purchase_request.division_id = d1.id
+                                        LEFT JOIN 
+                                            0_dimensions d2 ON purchase_request.subdivision_id = d2.id
                                         LEFT JOIN 
                                             purchase_actions ON purchase_request.requesting_id = purchase_actions.requesting_id
                                         WHERE 
@@ -3187,7 +3092,10 @@ def get_md_pending_requests():
                 "final_amount": row[3],
                 "final_amount_currency": row[4],
                 "stage": row[5].replace("_", " ") if row[5] else "",
-                "status": "Complete" if row[6] in ("C", "FD", "AP", "SA") else "Pending"
+                "status": "Complete" if row[6] in ("C", "FD", "AP", "SA") else "Pending",
+                "requesting_date": row[7],
+                "division": row[8],
+                "subdivision": row[9]
             }
             for row in md_pending_requests_result
         ]
@@ -3327,13 +3235,20 @@ def get_all_requests():
                                     purchase_request.final_amount,
                                     purchase_request.final_amount_currency,
                                     purchase_actions.action_id,
-                                    purchase_actions.status
+                                    purchase_actions.status,
+                                    purchase_request.requesting_date,
+                                    d1.name as division,
+                                    d2.name as subdivision
                                 FROM 
                                     purchase_request
                                 LEFT JOIN 
                                     0_emp ON purchase_request.purchase_in_charge = 0_emp.id
                                 LEFT JOIN 
                                     purchase_actions ON purchase_request.requesting_id = purchase_actions.requesting_id
+                                LEFT JOIN 
+                                    0_dimensions d1 ON purchase_request.division_id = d1.id
+                                LEFT JOIN 
+                                    0_dimensions d2 ON purchase_request.subdivision_id = d2.id
                                 WHERE 
                                     purchase_request.purchase_in_charge = %s
                                     AND purchase_actions.is_current=1"""
@@ -3357,7 +3272,10 @@ def get_all_requests():
                     "final_amount": row[3],
                     "final_amount_currency": row[4],
                     "stage": row[5].replace("_", " ") if row[5] else "",
-                    "status": "Complete" if row[6] in ("C", "FD", "AP", "SA") else "Pending"
+                    "status": "Complete" if row[6] in ("C", "FD", "AP", "SA") else "Pending",
+                    "requesting_date": row[7],
+                    "division": row[8],
+                    "subdivision": row[9]
                 }
                 for row in all_requests_result
             ]
@@ -3495,11 +3413,18 @@ def get_approval_pending_requests():
                                                     purchase_request.req_id,
                                                     purchase_request.final_amount,
                                                     purchase_request.final_amount_currency,
-                                                    users.full_name AS manager_name
+                                                    users.full_name AS manager_name,
+                                                    purchase_request.requesting_date,
+                                                    d1.name as division,
+                                                    d2.name as subdivision
                                                 FROM 
                                                     purchase_request
                                                 LEFT JOIN 
                                                     users ON purchase_request.approval_send_to = users.user_id
+                                                LEFT JOIN 
+                                                    0_dimensions d1 ON purchase_request.division_id = d1.id
+                                                LEFT JOIN 
+                                                    0_dimensions d2 ON purchase_request.subdivision_id = d2.id
                                                 WHERE 
                                                     purchase_request.purchase_in_charge = %s
                                                     AND (purchase_request.management_approval_status = 0 or purchase_request.management_approval_status IS NULL)
@@ -3516,7 +3441,10 @@ def get_approval_pending_requests():
                     "description": row[1],
                     "final_amount": row[2],
                     "final_amount_currency": row[3],
-                    "manager": row[4]
+                    "manager": row[4],
+                    "requesting_date": row[5],
+                    "division": row[6],
+                    "subdivision": row[7]
                 }
                 for row in approval_pending_requests_result
             ]
@@ -3657,11 +3585,18 @@ def get_md_pending_requests_stage_wise():
                                             purchase_request.final_amount,
                                             purchase_request.final_amount_currency,
                                             purchase_actions.action_id,
-                                            purchase_actions.status
+                                            purchase_actions.status,
+                                            purchase_request.requesting_date,
+                                            d1.name as division,
+                                            d2.name as subdivision
                                         FROM 
                                             purchase_request
                                         LEFT JOIN 
                                             0_emp ON purchase_request.purchase_in_charge = 0_emp.id
+                                        LEFT JOIN 
+                                            0_dimensions d1 ON purchase_request.division_id = d1.id
+                                        LEFT JOIN 
+                                            0_dimensions d2 ON purchase_request.subdivision_id = d2.id
                                         LEFT JOIN 
                                             purchase_actions ON purchase_request.requesting_id = purchase_actions.requesting_id
                                         WHERE 
@@ -3680,7 +3615,10 @@ def get_md_pending_requests_stage_wise():
                 "final_amount": row[3],
                 "final_amount_currency": row[4],
                 "stage": row[5].replace("_", " ") if row[5] else "",
-                "status": "Complete" if row[6] in ("C", "FD", "AP", "SA") else "Pending"
+                "status": "Complete" if row[6] in ("C", "FD", "AP", "SA") else "Pending",
+                "requesting_date": row[7],
+                "division": row[8],
+                "subdivision": row[9]
             }
             for row in md_pending_requests_stage_wise_result
         ]
@@ -3724,11 +3662,18 @@ def get_md_pending_requests_stage_wise_yearly_monthly():
                                             purchase_request.final_amount,
                                             purchase_request.final_amount_currency,
                                             purchase_actions.action_id,
-                                            purchase_actions.status
+                                            purchase_actions.status,
+                                            purchase_request.requesting_date,
+                                            d1.name as division,
+                                            d2.name as subdivision
                                         FROM 
                                             purchase_request
                                         LEFT JOIN 
                                             0_emp ON purchase_request.purchase_in_charge = 0_emp.id
+                                        LEFT JOIN 
+                                            0_dimensions d1 ON purchase_request.division_id = d1.id
+                                        LEFT JOIN 
+                                            0_dimensions d2 ON purchase_request.subdivision_id = d2.id
                                         LEFT JOIN 
                                             purchase_actions ON purchase_request.requesting_id = purchase_actions.requesting_id
                                         WHERE 
@@ -3754,7 +3699,10 @@ def get_md_pending_requests_stage_wise_yearly_monthly():
                 "final_amount": row[3],
                 "final_amount_currency": row[4],
                 "stage": row[5].replace("_", " ") if row[5] else "",
-                "status": "Complete" if row[6] in ("C", "FD", "AP", "SA") else "Pending"
+                "status": "Complete" if row[6] in ("C", "FD", "AP", "SA") else "Pending",
+                "requesting_date": row[7],
+                "division": row[8],
+                "subdivision": row[9]
             }
             for row in md_pending_requests_stage_wise_result
         ]
@@ -3796,11 +3744,18 @@ def get_ap_pending_requests_manager_wise():
                                                     purchase_request.req_id,
                                                     purchase_request.final_amount,
                                                     purchase_request.final_amount_currency,
-                                                    users.full_name AS manager_name
+                                                    users.full_name AS manager_name,
+                                                    purchase_request.requesting_date,
+                                                    d1.name as division,
+                                                    d2.name as subdivision
                                                 FROM 
                                                     purchase_request
                                                 LEFT JOIN 
                                                     users ON purchase_request.approval_send_to = users.user_id
+                                                LEFT JOIN 
+                                                    0_dimensions d1 ON purchase_request.division_id = d1.id
+                                                LEFT JOIN 
+                                                    0_dimensions d2 ON purchase_request.subdivision_id = d2.id
                                                 WHERE 
                                                     purchase_request.purchase_in_charge = %s
                                                     AND purchase_request.approval_send_to = %s
@@ -3817,6 +3772,9 @@ def get_ap_pending_requests_manager_wise():
                 "final_amount": row[2],
                 "final_amount_currency": row[3],
                 "manager": row[4],
+                "requesting_date": row[5],
+                "division": row[6],
+                "subdivision": row[7]
             }
             for row in ap_pending_requests_manager_wise_result
         ]
@@ -3863,7 +3821,7 @@ def get_yesterday_follow_up():
                                                     purchase_actions.is_current = 1
                                                     AND purchase_actions.action_id != 'LPO_SUBMISSION'
                                                     AND purchase_request.purchase_in_charge = %s
-                                                    AND purchase_actions.follow_up_date = DATE_SUB(CURDATE(), INTERVAL 1 DAY);"""
+                                                    AND purchase_actions.next_action_date = DATE_SUB(CURDATE(), INTERVAL 1 DAY);"""
             
             cursor.execute(yesterday_follow_up, (employee_id, ))
             yesterday_follow_up_result = cursor.fetchall()
@@ -3910,19 +3868,25 @@ def get_today_follow_up():
                                                     purchase_request.req_id,
                                                     purchase_request.final_amount,
                                                     purchase_request.final_amount_currency,
-                                                    0_emp.Name,
-                                                    purchase_request.next_action_code
+                                                    purchase_request.requesting_date,
+                                                    purchase_request.next_action_code,
+                                                    d1.name as division,
+                                                    d2.name as subdivision
                                                 FROM 
                                                     purchase_request
                                                 LEFT JOIN 
                                                     purchase_actions ON purchase_request.requesting_id = purchase_actions.requesting_id
                                                 LEFT JOIN 
                                                     0_emp ON purchase_request.purchase_in_charge = 0_emp.id
+                                                LEFT JOIN 
+                                                    0_dimensions d1 ON purchase_request.division_id = d1.id
+                                                LEFT JOIN 
+                                                    0_dimensions d2 ON purchase_request.subdivision_id = d2.id
                                                 WHERE 
                                                     purchase_actions.is_current = 1
                                                     AND purchase_actions.action_id != 'LPO_SUBMISSION'
                                                     AND purchase_request.purchase_in_charge = %s
-                                                    AND purchase_actions.follow_up_date = CURDATE();"""
+                                                    AND purchase_actions.next_action_date = CURDATE();"""
             
             cursor.execute(today_follow_up, (employee_id, ))
             today_follow_up_result = cursor.fetchall()
@@ -3933,8 +3897,10 @@ def get_today_follow_up():
                 "description": row[1],
                 "final_amount": row[2],
                 "final_amount_currency": row[3],
-                "person_incharge": row[4],
+                "requesting_date": row[4],
                 "next_action_code": re.sub(r'_([a-z])', lambda match: match.group(1).upper(), row[5]),
+                "division": row[6],
+                "subdivision": row[7],
             }
             for row in today_follow_up_result
         ]
@@ -3947,7 +3913,9 @@ def get_today_follow_up():
         return jsonify({"error": str(e)}), 500
     finally:
         cursor.close()
-        
+
+
+
 @application.route('/api/getmdApprovalsPending', methods=['GET'])
 def getmdApprovalsPending():
     cursor = mysql.connection.cursor()
@@ -4410,7 +4378,7 @@ def getMngrApprovedCount():
 def get_purchase_request_count():
     current_year = datetime.now().year  
     # current_month = datetime.now().month
-    current_month = datetime.now().month
+    current_month = 1
     cursor = mysql.connection.cursor()
     cursor.execute("""SELECT 
     COUNT(*) AS total_requests,
@@ -4450,7 +4418,7 @@ WHERE
 def get_carry_forwarded_purchase_request_count():
     current_year = datetime.now().year  
     # current_month = datetime.now().month
-    current_month = datetime.now().month
+    current_month = 1
     
     cursor = mysql.connection.cursor()
     cursor.execute("""
@@ -4499,7 +4467,7 @@ LEFT JOIN
 def get_purchase_request_approved_count():
     current_year = datetime.now().year  
     # current_month = datetime.now().month
-    current_month = datetime.now().month
+    current_month = 1
     cursor = mysql.connection.cursor()
     cursor.execute("""SELECT 
     COUNT(*) AS total_requests,
@@ -4539,7 +4507,7 @@ WHERE
 def get_purchase_request_lporeleased_count():
     current_year = datetime.now().year  
     # current_month = datetime.now().month
-    current_month = datetime.now().month
+    current_month = 1
     cursor = mysql.connection.cursor()
     cursor.execute("""SELECT 
     COUNT(*) AS total_requests,
@@ -4579,7 +4547,7 @@ WHERE
 def get_purchase_request_empadvance_count():
     current_year = datetime.now().year  
     # current_month = datetime.now().month
-    current_month = datetime.now().month
+    current_month = 1
     cursor = mysql.connection.cursor()
     cursor.execute("""SELECT 
     COUNT(*) AS total_requests,
@@ -4619,7 +4587,7 @@ WHERE
 def get_purchase_request_onlinepurchase_count():
     current_year = datetime.now().year  
     # current_month = datetime.now().month
-    current_month = datetime.now().month
+    current_month = 1
     cursor = mysql.connection.cursor()
     cursor.execute("""SELECT 
     COUNT(*) AS total_requests,
@@ -4659,7 +4627,7 @@ WHERE
 def get_purchase_request_pettycash_count():
     current_year = datetime.now().year  
     # current_month = datetime.now().month
-    current_month = datetime.now().month
+    current_month = 1
     cursor = mysql.connection.cursor()
     cursor.execute("""SELECT 
     COUNT(*) AS total_requests,
@@ -4700,7 +4668,7 @@ WHERE
 def get_purchase_request_directlpo_count():
     current_year = datetime.now().year  
     # current_month = datetime.now().month
-    current_month = datetime.now().month
+    current_month = 1
     cursor = mysql.connection.cursor()
     cursor.execute("""SELECT 
     COUNT(*) AS total_requests,
@@ -4740,7 +4708,7 @@ WHERE
 def get_purchase_request_materialdelivered_count():
     current_year = datetime.now().year  
     # current_month = datetime.now().month
-    current_month = datetime.now().month
+    current_month = 1
     cursor = mysql.connection.cursor()
     cursor.execute("""SELECT 
     COUNT(*) AS total_requests,
@@ -4781,7 +4749,7 @@ WHERE
 def get_purchase_request_materialdeliveredtotal_count():
     current_year = datetime.now().year  
     # current_month = datetime.now().month
-    current_month = datetime.now().month
+    current_month = 1
     cursor = mysql.connection.cursor()
     cursor.execute("""SELECT 
     COUNT(*) AS total_requests,
@@ -4830,7 +4798,7 @@ WHERE
 def get_purchase_request_materialdeliverypendingtotal_count():
     current_year = datetime.now().year  
     # current_month = datetime.now().month
-    current_month = datetime.now().month
+    current_month = 1
     cursor = mysql.connection.cursor()
     cursor.execute("""SELECT 
     COUNT(*) AS total_requests,
@@ -4878,7 +4846,7 @@ WHERE
 def get_purchase_request_ongoing_count():
     current_year = datetime.now().year  
     # current_month = datetime.now().month
-    current_month = datetime.now().month
+    current_month = 1
     cursor = mysql.connection.cursor()
     cursor.execute("""
         SELECT 
@@ -4921,7 +4889,7 @@ def get_purchase_request_ongoing_count():
 def get_purchase_request_cancel_count():
     current_year = datetime.now().year  
     # current_month = datetime.now().month
-    current_month = datetime.now().month
+    current_month = 1
     cursor = mysql.connection.cursor()
     cursor.execute("""SELECT 
         COUNT(*) AS total_requests,
@@ -4962,7 +4930,7 @@ def get_purchase_request_cancel_count():
 def get_purchase_request_billreceived_count():
     current_year = datetime.now().year  
     # current_month = datetime.now().month
-    current_month = datetime.now().month
+    current_month = 1
     cursor = mysql.connection.cursor()
     cursor.execute("""SELECT 
         COUNT(*) AS total_requests,
@@ -5004,7 +4972,7 @@ def get_purchase_request_billreceived_count():
 def get_purchase_request_empadvancebillreceived_count():
     current_year = datetime.now().year  
     # current_month = datetime.now().month
-    current_month = datetime.now().month
+    current_month = 1
     cursor = mysql.connection.cursor()
     cursor.execute("""SELECT 
         COUNT(*) AS total_requests,
@@ -5046,7 +5014,7 @@ def get_purchase_request_empadvancebillreceived_count():
 def get_purchase_request_sendtoaccounts_count():
     current_year = datetime.now().year  
     # current_month = datetime.now().month
-    current_month = datetime.now().month
+    current_month = 1
     cursor = mysql.connection.cursor()
     cursor.execute("""SELECT 
         COUNT(*) AS total_requests,
@@ -5088,7 +5056,7 @@ def get_purchase_request_sendtoaccounts_count():
 def get_purchase_request_billreceivedcurrentmonth_count():
     current_year = datetime.now().year  
     # current_month = datetime.now().month
-    current_month = datetime.now().month
+    current_month = 1
     cursor = mysql.connection.cursor()
     cursor.execute("""SELECT 
         COUNT(*) AS total_requests,
@@ -5129,7 +5097,7 @@ def get_purchase_request_billreceivedcurrentmonth_count():
 @application.route("/api/purchase-request-billreceivedpreviousmonth-count", methods=["GET"])
 def get_purchase_request_billreceivedpreviousmonth_count():
     current_year = datetime.now().year
-    current_month = datetime.now().month  # Hardcoded for testing
+    current_month = 1  # Hardcoded for testing
 
     # Calculate previous month
     if current_month == 1:
@@ -5182,7 +5150,7 @@ def get_purchase_request_billreceivedpreviousmonth_count():
 @application.route("/api/purchase-request-statuswise-count", methods=["GET"])
 def get_purchase_request_statuswise_count():
     current_year = datetime.now().year
-    current_month = datetime.now().month
+    current_month = 1  # Hardcoded for testing
 
 
     cursor = mysql.connection.cursor()
