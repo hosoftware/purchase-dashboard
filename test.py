@@ -165,6 +165,7 @@ def get_analytics():
         # print("Using cached data")
         # return pickle.loads(cached_data)
     # return({ "user": role_code })
+    return jsonify({"Success":user_role})
     if user_role == 2:
         cursor.callproc('GenerateYearlyQuery', (userid,))
         rows = cursor.fetchall()
