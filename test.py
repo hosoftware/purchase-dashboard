@@ -165,7 +165,6 @@ def get_analytics():
         # print("Using cached data")
         # return pickle.loads(cached_data)
     # return({ "user": role_code })
-    return jsonify({"Success":user_role})
     if user_role == 2:
         cursor.callproc('GenerateYearlyQuery', (userid,))
         rows = cursor.fetchall()
@@ -833,7 +832,7 @@ WHERE purchase_in_charge = %s AND cancel = 0
             "partial_md_count": partial_md_result[0][0],
             "md_pending_requests": md_pending_requests_result
         }
-        r.setex(cache_key, 600, pickle.dumps(data))
+        # r.setex(cache_key, 600, pickle.dumps(data))
         return jsonify(data)
     elif role_code == 'mngr':
         current_year = datetime.now().year  
