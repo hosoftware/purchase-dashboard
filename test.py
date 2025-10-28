@@ -147,6 +147,7 @@ def get_role_code():
         
 @application.route('/api/analytics', methods=['GET'])
 def get_analytics():
+    return jsonify({"Success":"YES"})
     r = redis.StrictRedis(host='localhost', port=6379, db=0, decode_responses=False)
     cursor = mysql.connection.cursor()
     encoded_user_id = request.args.get('user_id')
@@ -435,7 +436,6 @@ def get_analytics():
             
         })
     elif user_role == 3:
-        return jsonify({"Success":"YES"})
         if role_code != 'pmngr1':
             cursor.callproc('PurchaseReviewerYearly', (employee_id,))
             rows = cursor.fetchall()
