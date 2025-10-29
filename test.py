@@ -88,21 +88,24 @@ def get_employee():
                         SUM(
                             CASE 
                                 WHEN purchase_request.final_amount_currency = 'AED' 
-                                THEN purchase_request.final_amount 
+                                    THEN purchase_request.final_amount
                                 ELSE purchase_request.final_amount * COALESCE(latest_rates.rate_buy, 1)
                             END
                         ), 2
-                    ) AS total_final_amount_in_aed
-                FROM 
-                    purchase_request
-                LEFT JOIN 
-                    (
-                        SELECT curr_code, rate_buy
-                        FROM 0_exchange_rates 
+                    ) AS total_amount,
+                    COUNT(purchase_request.requesting_id) AS total_count
+                FROM purchase_request
+                LEFT JOIN (
+                    SELECT curr_code, rate_buy
+                    FROM 0_exchange_rates
+                    WHERE rate_type = 'AED'
+                    AND date_ = (
+                        SELECT MAX(date_)
+                        FROM 0_exchange_rates
                         WHERE rate_type = 'AED'
-                        AND id = (SELECT MAX(id) FROM 0_exchange_rates WHERE rate_type = 'AED')
-                    ) AS latest_rates
-                    ON purchase_request.final_amount_currency = latest_rates.curr_code
+                    )
+                ) AS latest_rates
+                ON purchase_request.final_amount_currency = latest_rates.curr_code
                 WHERE 
                     purchase_request.approved_by = %s AND YEAR(purchase_request.management_approval)  = %s AND MONTH(purchase_request.management_approval)  = %s ;""", (userid, current_year, current_month)
         )
@@ -147,7 +150,7 @@ def get_role_code():
         
 @application.route('/api/analytics', methods=['GET'])
 def get_analytics():
-    # r = redis.StrictRedis(host='localhost', port=6379, db=0, decode_responses=False)
+    r = redis.StrictRedis(host='localhost', port=6379, db=0, decode_responses=False)
     cursor = mysql.connection.cursor()
     encoded_user_id = request.args.get('user_id')
     decoded_bytes = base64.b64decode(encoded_user_id)
@@ -158,12 +161,11 @@ def get_analytics():
     employee_id = user_role_query[0][1]
     role_code = user_role_query[0][2]
     cache_key = f"purchase_request_data_{employee_id}"
-    # cached_data = r.get(cache_key)
-
-    # if cached_data:
+    cached_data = r.get(cache_key)
+    if cached_data:
         # If data is found in cache, return the cached data
         # print("Using cached data")
-        # return pickle.loads(cached_data)
+        return pickle.loads(cached_data)
     # return({ "user": role_code })
     if user_role == 2:
         cursor.callproc('GenerateYearlyQuery', (userid,))
@@ -436,6 +438,7 @@ def get_analytics():
             
         })
     elif user_role == 3:
+        
         if role_code != 'pmngr1':
             cursor.callproc('PurchaseReviewerYearly', (employee_id,))
             rows = cursor.fetchall()
@@ -832,7 +835,7 @@ WHERE purchase_in_charge = %s AND cancel = 0
             "partial_md_count": partial_md_result[0][0],
             "md_pending_requests": md_pending_requests_result
         }
-        # r.setex(cache_key, 600, pickle.dumps(data))
+        r.setex(cache_key, 600, pickle.dumps(data))
         return jsonify(data)
     elif role_code == 'mngr':
         current_year = datetime.now().year  
@@ -2575,11 +2578,17 @@ def get_exceeding_date_requests():
                                                 0_emp.name,
                                                 purchase_request.final_amount,
                                                 purchase_request.final_amount_currency,
-                                                DATEDIFF(CURDATE(), purchase_request.expected_delivery_date) AS days_delayed
+                                                DATEDIFF(CURDATE(), purchase_request.expected_delivery_date) AS days_delayed,purchase_request.requesting_date,
+                                                d1.name as division,
+                                                d2.name as subdivision
                                             FROM 
                                                 purchase_request
                                             LEFT JOIN 
                                                 0_emp ON purchase_request.purchase_in_charge = 0_emp.id
+                                            LEFT JOIN 
+                                                0_dimensions d1 ON purchase_request.division_id = d1.id
+                                            LEFT JOIN 
+                                                0_dimensions d2 ON purchase_request.subdivision_id = d2.id
                                             WHERE 
                                                 purchase_request.purchase_in_charge = %s 
                                                 
@@ -2594,7 +2603,10 @@ def get_exceeding_date_requests():
                     "person_incharge": row[2],
                     "final_amount": row[3],
                     "final_amount_currency": row[4],
-                    "days_delayed": row[5]
+                    "days_delayed": row[5],
+                    "requesting_date": row[6],
+                    "division": row[7],
+                    "subdivision": row[8]
                 }
                 for row in exceeding_date_requests_result
             ]
@@ -2606,11 +2618,18 @@ def get_exceeding_date_requests():
                                                 0_emp.name,
                                                 purchase_request.final_amount,
                                                 purchase_request.final_amount_currency,
-                                                DATEDIFF(CURDATE(), purchase_request.expected_delivery_date) AS days_delayed
+                                                DATEDIFF(CURDATE(), purchase_request.expected_delivery_date) AS days_delayed,
+                                                purchase_request.requesting_date,
+                                                d1.name as division,
+                                                d2.name as subdivision
                                             FROM 
                                                 purchase_request
                                             LEFT JOIN 
                                                 0_emp ON purchase_request.purchase_in_charge = 0_emp.id
+                                            LEFT JOIN 
+                                                0_dimensions d1 ON purchase_request.division_id = d1.id
+                                            LEFT JOIN 
+                                                0_dimensions d2 ON purchase_request.subdivision_id = d2.id
                                             WHERE 
                                                 purchase_request.purchase_in_charge = %s 
                                                 
@@ -2625,7 +2644,10 @@ def get_exceeding_date_requests():
                     "person_incharge": row[2],
                     "final_amount": row[3],
                     "final_amount_currency": row[4],
-                    "days_delayed": row[5]
+                    "days_delayed": row[5],
+                    "requesting_date": row[6],
+                    "division": row[7],
+                    "subdivision": row[8]
                 }
                 for row in exceeding_date_requests_result
             ]
@@ -3526,7 +3548,7 @@ def get_delivery_pending_requests_yearly_monthly():
                                             purchase_request
                                         WHERE 
                                             purchase_request.purchase_in_charge = %s
-                                            AND purchase_request.meterial_delivery=0"""
+                                            AND purchase_request.meterial_delivery=0 AND cancel=0"""
                 
                 if option == 'po':
                    md_pending_requests += """ AND purchase_request.payment_mode = 1"""
@@ -3547,7 +3569,9 @@ def get_delivery_pending_requests_yearly_monthly():
                     cursor.execute(md_pending_requests, (employee_id, ))
                 md_pending_requests_result = cursor.fetchall()
                 return jsonify({ 
-                    "delivery_pending_requests_yearly_monthly": md_pending_requests_result
+                    "delivery_pending_requests_yearly_monthly": md_pending_requests_result,
+                    "Query": md_pending_requests,
+                    "user": employee_id
                     })
                 
     except Exception as e:
@@ -3810,13 +3834,20 @@ def get_yesterday_follow_up():
                                                     purchase_request.final_amount,
                                                     purchase_request.final_amount_currency,
                                                     0_emp.Name,
-                                                    purchase_request.next_action_code
+                                                    purchase_request.next_action_code,
+                                                    purchase_request.requesting_date,
+                                                    d1.name as division,
+                                                    d2.name as subdivision
                                                 FROM 
                                                     purchase_request
                                                 LEFT JOIN 
                                                     purchase_actions ON purchase_request.requesting_id = purchase_actions.requesting_id
                                                 LEFT JOIN 
                                                     0_emp ON purchase_request.purchase_in_charge = 0_emp.id
+                                                LEFT JOIN 
+                                                    0_dimensions d1 ON purchase_request.division_id = d1.id
+                                                LEFT JOIN 
+                                                    0_dimensions d2 ON purchase_request.subdivision_id = d2.id
                                                 WHERE 
                                                     purchase_actions.is_current = 1
                                                     AND purchase_actions.action_id != 'LPO_SUBMISSION'
@@ -3834,6 +3865,9 @@ def get_yesterday_follow_up():
                 "final_amount_currency": row[3],
                 "person_incharge": row[4],
                 "next_action_code": re.sub(r'_([a-z])', lambda match: match.group(1).upper(), row[5]),
+                "requesting_date": row[6],
+                "division": row[7],
+                "subdivision": row[8]
             }
             for row in yesterday_follow_up_result
         ]
