@@ -2783,13 +2783,20 @@ def get_lpo_pending_requests():
                                                 0_emp.name,
                                                 purchase_request.final_amount,
                                                 purchase_request.final_amount_currency,
-                                                DATEDIFF(CURDATE(), purchase_request.management_approval) AS days_delayed
+                                                DATEDIFF(CURDATE(), purchase_request.management_approval) AS days_delayed,
+                                                purchase_request.requesting_date,
+                                                d1.name as division,
+                                                d2.name as subdivision
                                             FROM 
                                                 purchase_request
                                             LEFT JOIN 
                                                 0_emp ON purchase_request.purchase_in_charge = 0_emp.id
                                             LEFT JOIN
                                                 purchase_actions pa ON purchase_request.requesting_id = pa.requesting_id
+                                            LEFT JOIN 
+                                                0_dimensions d1 ON purchase_request.division_id = d1.id
+                                            LEFT JOIN 
+                                                0_dimensions d2 ON purchase_request.subdivision_id = d2.id
                                             WHERE 
                                                 purchase_request.purchase_in_charge = %s  
                                             AND pa.is_current = 1        -- Ensuring only the current stage is considered
@@ -2827,7 +2834,10 @@ def get_lpo_pending_requests():
                     "person_incharge": row[2],
                     "final_amount": row[3],
                     "final_amount_currency": row[4],
-                    "days_delayed": row[5]
+                    "days_delayed": row[5],
+                    "requesting_date": row[6],
+                    "division": row[7],
+                    "subdivision": row[8]
                 }
                 for row in lpo_pending_requests_result
             ]
