@@ -107,7 +107,10 @@ def get_employee():
                 ) AS latest_rates
                 ON purchase_request.final_amount_currency = latest_rates.curr_code
                 WHERE 
-                    purchase_request.approved_by = %s AND YEAR(purchase_request.management_approval)  = %s AND MONTH(purchase_request.management_approval)  = %s ;""", (userid, current_year, current_month)
+                    purchase_request.approved_by = %s AND 
+                    YEAR(purchase_request.management_approval)  = %s AND 
+                    MONTH(purchase_request.management_approval)  = %s AND
+                    purchase_request.cancel!=1;""", (userid, current_year, current_month)
         )
         approved_amount = cursor.fetchall()
     else:
@@ -943,7 +946,7 @@ WHERE purchase_in_charge = %s AND cancel = 0
 # API endpoint to get the request count based on the selected option
 @application.route('/api/requests', methods=['GET'])
 def get_requests():
-    r = redis.StrictRedis(host='localhost', port=6379, db=0, decode_responses=False)
+    # r = redis.StrictRedis(host='localhost', port=6379, db=0, decode_responses=False)
     cursor = mysql.connection.cursor()
     option = request.args.get('option')  # Get the option from the query string
     encoded_user_id = request.args.get('user_id')
@@ -3814,7 +3817,8 @@ def get_ap_pending_requests_manager_wise():
                                                     purchase_request.purchase_in_charge = %s
                                                     AND purchase_request.approval_send_to = %s
                                                     AND (purchase_request.management_approval_status = 0 or purchase_request.management_approval_status IS NULL)
-                                                    AND purchase_request.final_negotiation_status = 1;"""
+                                                    AND purchase_request.final_negotiation_status = 1
+                                                    AND purchase_request.cancel!=1;"""
             
             cursor.execute(ap_pending_requests_manager_wise, (employee_id, manager))
             ap_pending_requests_manager_wise_result = cursor.fetchall()
